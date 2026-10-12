@@ -96,7 +96,7 @@ app.post("/events/:id/reserve", async (req, res) => {
     const { id } = req.params;
 
     const eventResult = await client.query(
-      "SELECT * FROM events WHERE id = $1",
+      "SELECT * FROM events WHERE id = $1 FOR UPDATE",
       [id],
     );
 
