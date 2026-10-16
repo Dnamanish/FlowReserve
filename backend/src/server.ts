@@ -87,12 +87,33 @@ app.get("/events/:id", async (req, res) => {
 });
 
 app.post("/events/:id/reserve", async (req, res) => {
+  const { user_id } = req.body;
+
+  if (!Number.isInteger(user_id) || user_id <= 0) {
+    return res.status(400).json({
+      error: "user_id must be a positive integer",
+    });
+  }
   const client = await pool.connect();
 
   try {
     await client.query("BEGIN");
 
-    // reservation logic will go here
+    // Check whether the user exists here.
+    const userResult = await client.query(
+      "SELECT id FROM users WHERE id = $1",
+      [user_id],
+    );
+
+    if (userResult.rows.length === 0) {
+      await client.query("ROLLBACK");
+
+      return res.status(404).json({
+        error: "User not found",
+      });
+    }
+
+    // reservation logic
     const { id } = req.params;
 
     const eventResult = await client.query(
@@ -121,7 +142,6 @@ app.post("/events/:id/reserve", async (req, res) => {
     const status = confirmedCount < event.capacity ? "confirmed" : "waiting";
 
     // save status for new reservation in postgress
-    const { user_id } = req.body;
 
     const reservationResult = await client.query(
       `INSERT INTO reservations (user_id, event_id, status)
@@ -135,10 +155,134 @@ app.post("/events/:id/reserve", async (req, res) => {
     return res.status(201).json(reservationResult.rows[0]);
   } catch (error) {
     await client.query("ROLLBACK");
+
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "23505"
+    ) {
+      return res.status(409).json({
+        error: "You already have an active reservation for this event",
+      });
+    }
+
     console.error("Reservation error:", error);
 
     return res.status(500).json({
       error: "Failed to create reservation",
+    });
+  } finally {
+    client.release();
+  }
+});
+
+app.post("/reservations/:id/cancel", async (req, res) => {
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    const { id } = req.params;
+
+    // Find the reservation
+    const reservationResult = await client.query(
+      "SELECT * FROM reservations WHERE id=$1",
+      [id],
+    );
+
+    if (reservationResult.rows.length === 0) {
+      await client.query("ROLLBACK");
+
+      return res.status(404).json({
+        error: "Reservation not found",
+      });
+    }
+
+    const reservation = reservationResult.rows[0];
+
+    // Lock the event
+    const eventResult = await client.query(
+      "SELECT id FROM events WHERE id = $1 FOR UPDATE",
+      [reservation.event_id],
+    );
+
+    if (eventResult.rows.length === 0) {
+      await client.query("ROLLBACK");
+
+      return res.status(404).json({
+        error: "Event not found",
+      });
+    }
+
+    // fetch the reservation a second time
+    const currentReservationResult = await client.query(
+      "SELECT * FROM reservations WHERE id = $1",
+      [id],
+    );
+
+    const currentReservation = currentReservationResult.rows[0];
+
+    if (currentReservation.status === "cancelled") {
+      await client.query("ROLLBACK");
+
+      return res.status(400).json({
+        error: "Reservation is already cancelled",
+      });
+    }
+
+    // Cancel the reservation
+    const cancelResult = await client.query(
+      `UPDATE reservations
+       SET status = 'cancelled'
+       WHERE id = $1
+       RETURNING *`,
+      [id],
+    );
+
+    // Decide whether to promote someone
+    let promotedReservation = null;
+
+    if (currentReservation.status === "confirmed") {
+      const nextReservationResult = await client.query(
+        `SELECT *
+         FROM reservations
+         WHERE event_id = $1
+         AND status = 'waiting'
+         ORDER BY created_at ASC, id ASC
+         LIMIT 1`,
+        [currentReservation.event_id],
+      );
+
+      if (nextReservationResult.rows.length > 0) {
+        const nextReservation = nextReservationResult.rows[0];
+
+        const promotionResult = await client.query(
+          `UPDATE reservations
+            SET status = 'confirmed'
+            WHERE id = $1
+            RETURNING *`,
+          [nextReservation.id],
+        );
+
+        promotedReservation = promotionResult.rows[0];
+      }
+    }
+
+    // Commit and return the response
+    await client.query("COMMIT");
+
+    return res.status(200).json({
+      message: "Reservation cancelled successfully",
+      cancelledReservation: cancelResult.rows[0],
+      promotedReservation,
+    });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error("Cancellation error:", error);
+
+    return res.status(500).json({
+      error: "Failed to cancel reservation",
     });
   } finally {
     client.release();
