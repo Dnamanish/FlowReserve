@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import pool from "./config/db";
+import type { PoolClient } from "pg";
 
 dotenv.config();
 
@@ -89,14 +90,23 @@ app.get("/events/:id", async (req, res) => {
 app.post("/events/:id/reserve", async (req, res) => {
   const { user_id } = req.body;
 
+  const eventId = Number(req.params.id);
+
+  if (!Number.isInteger(eventId) || eventId <= 0) {
+    return res.status(400).json({
+      error: "Event ID must be a positive integer",
+    });
+  }
+
   if (!Number.isInteger(user_id) || user_id <= 0) {
     return res.status(400).json({
       error: "user_id must be a positive integer",
     });
   }
-  const client = await pool.connect();
+  let client: PoolClient | undefined;
 
   try {
+    client = await pool.connect();
     await client.query("BEGIN");
 
     // Check whether the user exists here.
@@ -114,11 +124,10 @@ app.post("/events/:id/reserve", async (req, res) => {
     }
 
     // reservation logic
-    const { id } = req.params;
 
     const eventResult = await client.query(
       "SELECT * FROM events WHERE id = $1 FOR UPDATE",
-      [id],
+      [eventId],
     );
 
     if (eventResult.rows.length === 0) {
@@ -135,7 +144,7 @@ app.post("/events/:id/reserve", async (req, res) => {
       FROM reservations
       WHERE event_id = $1
       AND status = 'confirmed'`,
-      [id],
+      [eventId],
     );
 
     const confirmedCount = countResult.rows[0].count;
@@ -147,14 +156,20 @@ app.post("/events/:id/reserve", async (req, res) => {
       `INSERT INTO reservations (user_id, event_id, status)
        VALUES ($1, $2, $3)
         RETURNING *`,
-      [user_id, id, status],
+      [user_id, eventId, status],
     );
 
     await client.query("COMMIT");
 
     return res.status(201).json(reservationResult.rows[0]);
   } catch (error) {
-    await client.query("ROLLBACK");
+    if (client) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackError) {
+        console.error("Rollback error:", rollbackError);
+      }
+    }
 
     if (
       typeof error === "object" &&
@@ -173,14 +188,15 @@ app.post("/events/:id/reserve", async (req, res) => {
       error: "Failed to create reservation",
     });
   } finally {
-    client.release();
+    client?.release();
   }
 });
 
 app.post("/reservations/:id/cancel", async (req, res) => {
-  const client = await pool.connect();
+  let client: PoolClient | undefined;
 
   try {
+    client = await pool.connect();
     await client.query("BEGIN");
 
     const { id } = req.params;
@@ -278,14 +294,21 @@ app.post("/reservations/:id/cancel", async (req, res) => {
       promotedReservation,
     });
   } catch (error) {
-    await client.query("ROLLBACK");
+    if (client) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackError) {
+        console.error("Rollback error:", rollbackError);
+      }
+    }
+
     console.error("Cancellation error:", error);
 
     return res.status(500).json({
       error: "Failed to cancel reservation",
     });
   } finally {
-    client.release();
+    client?.release();
   }
 });
 
