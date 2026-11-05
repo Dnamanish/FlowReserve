@@ -53,8 +53,26 @@ app.post("/events", async (req, res) => {
 app.get("/events", async (req, res) => {
   try {
     const result = await pool.query(
-      "SELECT * FROM events ORDER BY created_at DESC",
+      `SELECT
+         e.id,
+         e.name,
+         e.capacity,
+         e.created_at,
+         COUNT(r.id) FILTER (
+           WHERE r.status = 'confirmed'
+         )::int AS confirmed_count,
+         GREATEST(
+           e.capacity - COUNT(r.id) FILTER (
+             WHERE r.status = 'confirmed'
+           ),
+           0
+         )::int AS remaining_spots
+       FROM events e
+       LEFT JOIN reservations r ON r.event_id = e.id
+       GROUP BY e.id
+       ORDER BY e.created_at DESC`,
     );
+
     res.json(result.rows);
   } catch (error) {
     console.error("Error fetching events:", error);
@@ -309,6 +327,52 @@ app.post("/reservations/:id/cancel", async (req, res) => {
     });
   } finally {
     client?.release();
+  }
+});
+
+app.get("/users/:id/reservations", async (req, res) => {
+  const userId = Number(req.params.id);
+
+  if (!Number.isInteger(userId) || userId <= 0) {
+    return res.status(400).json({
+      error: "User ID must be a positive integer",
+    });
+  }
+
+  try {
+    const userResult = await pool.query("SELECT id FROM users WHERE id = $1", [
+      userId,
+    ]);
+
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({
+        error: "User not found",
+      });
+    }
+
+    const result = await pool.query(
+      `SELECT
+         r.id AS reservation_id,
+         r.user_id,
+         r.event_id,
+         r.status,
+         r.created_at,
+         e.name AS event_name,
+         e.capacity
+       FROM reservations r
+       JOIN events e ON e.id = r.event_id
+       WHERE r.user_id = $1
+       ORDER BY r.created_at DESC, r.id DESC`,
+      [userId],
+    );
+
+    return res.json(result.rows);
+  } catch (error) {
+    console.error("Error fetching user reservations:", error);
+
+    return res.status(500).json({
+      error: "Failed to fetch user reservations",
+    });
   }
 });
 
