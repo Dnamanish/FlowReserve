@@ -3,6 +3,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import pool from "./config/db";
 import type { PoolClient } from "pg";
+import argon2 from "argon2";
 
 dotenv.config();
 
@@ -10,6 +11,98 @@ const app = express();
 
 app.use(cors());
 app.use(express.json());
+
+app.post("/auth/register", async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
+
+    // validate req field
+    if (
+      typeof name !== "string" ||
+      typeof email !== "string" ||
+      typeof password !== "string"
+    ) {
+      return res
+        .status(400)
+        .json({ error: "Name, email and password are required" });
+    }
+
+    const normalizedName = name.trim();
+    const normalizedEmail = email.trim().toLowerCase();
+
+    //Validate name
+    if (normalizedName.length < 2 || normalizedName.length > 50) {
+      return res.status(400).json({
+        error: "Name must contain between 2 and 50 characters",
+      });
+    }
+
+    //Validate email
+    if (
+      normalizedEmail.length > 255 ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)
+    ) {
+      return res.status(400).json({
+        error: "Please provide a valid email address",
+      });
+    }
+
+    // Validate password
+    if (password.length < 12 || password.length > 128) {
+      return res.status(400).json({
+        error: "Password must contain between 12 and 128 characters",
+      });
+    }
+
+    // Check  email  exists
+    const existingUser = await pool.query(
+      "SELECT id FROM users WHERE email = $1",
+      [normalizedEmail],
+    );
+
+    if (existingUser.rows.length > 0) {
+      return res.status(409).json({
+        error: "An account with this email already exists",
+      });
+    }
+
+    // hash pass using argon2id
+    const passwordHash = await argon2.hash(password, {
+      type: argon2.argon2id,
+      memoryCost: 19456,
+      timeCost: 2,
+      parallelism: 1,
+    });
+
+    // Insert user into PostgreSQL
+    const result = await pool.query(
+      `INSERT INTO users (name, email, password_hash)
+       VALUES ($1, $2, $3)
+       RETURNING id, name, email, created_at`,
+      [normalizedName, normalizedEmail, passwordHash],
+    );
+    return res.status(201).json({
+      message: "Account created successfully",
+      user: result.rows[0],
+    });
+  } catch (error) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "23505"
+    ) {
+      return res.status(409).json({
+        error: "An account with this email already exists",
+      });
+    }
+    console.error("Registration error:", error);
+
+    return res.status(500).json({
+      error: "Failed to register user",
+    });
+  }
+});
 
 app.get("/db", async (req, res) => {
   try {
