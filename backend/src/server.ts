@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import pool from "./config/db";
 import type { PoolClient } from "pg";
 import argon2 from "argon2";
+import { randomBytes, createHash } from "node:crypto";
 
 dotenv.config();
 
@@ -100,6 +101,87 @@ app.post("/auth/register", async (req, res) => {
 
     return res.status(500).json({
       error: "Failed to register user",
+    });
+  }
+});
+
+app.post("/auth/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    // Validate input types
+    if (typeof email !== "string" || typeof password !== "string") {
+      return res.status(400).json({
+        error: "Email and password are required",
+      });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+
+    // Find user in PostgreSQL
+    const result = await pool.query(
+      `SELECT id, name, email, password_hash
+       FROM users
+       WHERE email = $1`,
+      [normalizedEmail],
+    );
+
+    const user = result.rows[0];
+
+    // Verify password
+    if (!user || !user.password_hash) {
+      return res.status(401).json({
+        error: "Invalid email or password",
+      });
+    }
+
+    const isPasswordValid = await argon2.verify(user.password_hash, password);
+
+    if (!isPasswordValid) {
+      return res.status(401).json({
+        error: "Invalid email or password",
+      });
+    }
+
+    //  Generate a random session token
+    const sessionToken = randomBytes(32).toString("hex");
+
+    //  Hash the session token
+    const tokenHash = createHash("sha256").update(sessionToken).digest("hex");
+
+    // Set absolute session expiry (24 hours)
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+    // Store session in PostgreSQL
+    await pool.query(
+      `INSERT INTO sessions (user_id, token_hash, expires_at)
+       VALUES ($1, $2, $3)`,
+      [user.id, tokenHash, expiresAt],
+    );
+
+    // Send session token through HttpOnly cookie
+    res.cookie("flowreserve_session", sessionToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      path: "/",
+      maxAge: 24 * 60 * 60 * 1000,
+    });
+
+    // 9. Return public user information
+    return res.status(200).json({
+      message: "Login successful",
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+      },
+    });
+  } catch (error) {
+    console.error("Login error:", error);
+
+    return res.status(500).json({
+      error: "Failed to login",
     });
   }
 });
