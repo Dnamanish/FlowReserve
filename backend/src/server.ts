@@ -5,6 +5,7 @@ import pool from "./config/db";
 import type { PoolClient } from "pg";
 import argon2 from "argon2";
 import { randomBytes, createHash } from "node:crypto";
+import cookieParser from "cookie-parser";
 
 dotenv.config();
 
@@ -12,6 +13,16 @@ const app = express();
 
 app.use(cors());
 app.use(express.json());
+
+app.use(cookieParser());
+
+declare global {
+  namespace Express {
+    interface Request {
+      userId?: number;
+    }
+  }
+}
 
 app.post("/auth/register", async (req, res) => {
   try {
@@ -184,6 +195,86 @@ app.post("/auth/login", async (req, res) => {
       error: "Failed to login",
     });
   }
+});
+
+// middleware
+const authenticateUser = async (
+  req: express.Request,
+  res: express.Response,
+  next: express.NextFunction,
+) => {
+  try {
+    // Read session token from cookie
+    const sessionToken = req.cookies.flowreserve_session;
+
+    if (!sessionToken) {
+      return res.status(401).json({
+        error: "Authentication required",
+      });
+    }
+
+    // Hash the session token
+    const tokenHash = createHash("sha256").update(sessionToken).digest("hex");
+
+    // Find session in database
+    const result = await pool.query(
+      `SELECT user_id, expires_at, last_used_at
+       FROM sessions
+       WHERE token_hash = $1
+       AND revoked_at IS NULL`,
+      [tokenHash],
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(401).json({
+        error: "Invalid session",
+      });
+    }
+
+    const session = result.rows[0];
+
+    // Check absolute expiry
+    if (new Date(session.expires_at) <= new Date()) {
+      return res.status(401).json({
+        error: "Session expired",
+      });
+    }
+
+    // Check idle timeout (30 minutes)
+    const lastActivity = new Date(session.last_used_at).getTime();
+
+    if (Date.now() - lastActivity > 30 * 60 * 1000) {
+      return res.status(401).json({
+        error: "Session expired due to inactivity",
+      });
+    }
+
+    // Update last activity
+    await pool.query(
+      `UPDATE sessions
+       SET last_used_at = CURRENT_TIMESTAMP
+       WHERE token_hash = $1`,
+      [tokenHash],
+    );
+
+    // Attach authenticated user ID to request
+    req.userId = session.user_id;
+
+    next();
+  } catch (error) {
+    console.error("Authentication error:", error);
+
+    return res.status(500).json({
+      error: "Authentication failed",
+    });
+  }
+};
+
+app.get("/auth/me", authenticateUser, (req, res) => {
+  return res.status(200).json({
+    message: "You are authenticated",
+    userId: req.userId,
+  });
 });
 
 app.get("/db", async (req, res) => {
