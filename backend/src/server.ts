@@ -371,16 +371,9 @@ app.get("/events/:id", async (req, res) => {
   }
 });
 
-app.post("/events/:id/reserve", async (req, res) => {
-  const { user_id } = req.body;
-
+app.post("/events/:id/reserve", authenticateUser, async (req, res) => {
   const eventId = Number(req.params.id);
-
-  if (!Number.isInteger(eventId) || eventId <= 0) {
-    return res.status(400).json({
-      error: "Event ID must be a positive integer",
-    });
-  }
+  const user_id = req.userId!;
 
   if (!Number.isInteger(user_id) || user_id <= 0) {
     return res.status(400).json({
@@ -476,8 +469,10 @@ app.post("/events/:id/reserve", async (req, res) => {
   }
 });
 
-app.post("/reservations/:id/cancel", async (req, res) => {
+app.post("/reservations/:id/cancel", authenticateUser, async (req, res) => {
   let client: PoolClient | undefined;
+
+  const userId = req.userId!;
 
   try {
     client = await pool.connect();
@@ -487,8 +482,10 @@ app.post("/reservations/:id/cancel", async (req, res) => {
 
     // Find the reservation
     const reservationResult = await client.query(
-      "SELECT * FROM reservations WHERE id=$1",
-      [id],
+     `SELECT *
+      FROM reservations
+      WHERE id = $1 AND user_id = $2`,
+      [id, userId],
     );
 
     if (reservationResult.rows.length === 0) {
@@ -517,9 +514,11 @@ app.post("/reservations/:id/cancel", async (req, res) => {
 
     // fetch the reservation a second time
     const currentReservationResult = await client.query(
-      "SELECT * FROM reservations WHERE id = $1",
-      [id],
-    );
+      `SELECT *
+      FROM reservations
+      WHERE id = $1 AND user_id = $2`,
+      [id, userId],
+);
 
     const currentReservation = currentReservationResult.rows[0];
 
