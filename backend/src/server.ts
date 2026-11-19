@@ -11,7 +11,13 @@ dotenv.config();
 
 const app = express();
 
-app.use(cors());
+app.use(
+  cors({
+    origin: "http://localhost:5173",
+    credentials: true,
+  }),
+);
+
 app.use(express.json());
 
 app.use(cookieParser());
@@ -157,6 +163,14 @@ app.post("/auth/login", async (req, res) => {
     //  Generate a random session token
     const sessionToken = randomBytes(32).toString("hex");
 
+    // CSRF SHIT starts here 🤡🤡
+
+    // Generate CSRF token
+    const csrfToken = randomBytes(32).toString("hex");
+
+    // Hash CSRF token
+    const csrfTokenHash = createHash("sha256").update(csrfToken).digest("hex");
+
     //  Hash the session token
     const tokenHash = createHash("sha256").update(sessionToken).digest("hex");
 
@@ -165,9 +179,9 @@ app.post("/auth/login", async (req, res) => {
 
     // Store session in PostgreSQL
     await pool.query(
-      `INSERT INTO sessions (user_id, token_hash, expires_at)
-       VALUES ($1, $2, $3)`,
-      [user.id, tokenHash, expiresAt],
+      `INSERT INTO sessions (user_id,token_hash,csrf_token_hash ,expires_at)
+       VALUES ($1, $2, $3,$4)`,
+      [user.id, tokenHash, csrfTokenHash, expiresAt],
     );
 
     // Send session token through HttpOnly cookie
@@ -179,9 +193,10 @@ app.post("/auth/login", async (req, res) => {
       maxAge: 24 * 60 * 60 * 1000,
     });
 
-    // 9. Return public user information
+    
     return res.status(200).json({
       message: "Login successful",
+      csrfToken,
       user: {
         id: user.id,
         name: user.name,
@@ -482,7 +497,7 @@ app.post("/reservations/:id/cancel", authenticateUser, async (req, res) => {
 
     // Find the reservation
     const reservationResult = await client.query(
-     `SELECT *
+      `SELECT *
       FROM reservations
       WHERE id = $1 AND user_id = $2`,
       [id, userId],
@@ -518,7 +533,7 @@ app.post("/reservations/:id/cancel", authenticateUser, async (req, res) => {
       FROM reservations
       WHERE id = $1 AND user_id = $2`,
       [id, userId],
-);
+    );
 
     const currentReservation = currentReservationResult.rows[0];
 
@@ -595,26 +610,10 @@ app.post("/reservations/:id/cancel", authenticateUser, async (req, res) => {
   }
 });
 
-app.get("/users/:id/reservations", async (req, res) => {
-  const userId = Number(req.params.id);
-
-  if (!Number.isInteger(userId) || userId <= 0) {
-    return res.status(400).json({
-      error: "User ID must be a positive integer",
-    });
-  }
+app.get("/my-reservations", authenticateUser, async (req, res) => {
+  const userId = req.userId!;
 
   try {
-    const userResult = await pool.query("SELECT id FROM users WHERE id = $1", [
-      userId,
-    ]);
-
-    if (userResult.rows.length === 0) {
-      return res.status(404).json({
-        error: "User not found",
-      });
-    }
-
     const result = await pool.query(
       `SELECT
          r.id AS reservation_id,
@@ -637,6 +636,49 @@ app.get("/users/:id/reservations", async (req, res) => {
 
     return res.status(500).json({
       error: "Failed to fetch user reservations",
+    });
+  }
+});
+
+app.post("/auth/logout", async (req, res) => {
+  try {
+    // Read session token from cookie
+    const sessionToken = req.cookies.flowreserve_session;
+
+    if (!sessionToken) {
+      return res.status(401).json({
+        error: "No active session",
+      });
+    }
+
+    // Hash the session token
+    const tokenHash = createHash("sha256").update(sessionToken).digest("hex");
+
+    // Revoke session in PostgreSQL
+    await pool.query(
+      `UPDATE sessions
+       SET revoked_at = CURRENT_TIMESTAMP
+       WHERE token_hash = $1
+       AND revoked_at IS NULL`,
+      [tokenHash],
+    );
+
+    // Clear browser cookie
+    res.clearCookie("flowreserve_session", {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      path: "/",
+    });
+
+    return res.status(200).json({
+      message: "Logout successful",
+    });
+  } catch (error) {
+    console.error("Logout error:", error);
+
+    return res.status(500).json({
+      error: "Failed to logout",
     });
   }
 });
